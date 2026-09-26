@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import time
 from datetime import datetime, timedelta
 from selenium import webdriver
@@ -14,7 +15,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    print("Gwall: Mae SUPABASE_URL neu SUPABASE_KEY ar goll.")
+    print("Error: SUPABASE_URL o SUPABASE_KEY no configuradas en GitHub Secrets.")
     sys.exit(1)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -31,13 +32,17 @@ MESES_NUMERO = {
     "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
 }
 
-modo_env = os.environ.get("MODO_HISTORICO", "false").strip().lower()
-MODO_HISTORICO = modo_env in ["true", "1", "t", "yes"]
+# 1. Verificar si la base de datos está vacía; si no tiene registros, forzar histórico
+modo_env = str(os.environ.get("MODO_HISTORICO", "")).strip().lower()
+es_historico_manual = modo_env in ["true", "1", "yes", "si"]
 
-if MODO_HISTORICO:
+datos_existentes = supabase.table("ufv_datos").select("id").limit(1).execute()
+base_datos_vacia = len(datos_existentes.data) == 0
+
+if es_historico_manual or base_datos_vacia:
     fecha_ini = datetime(2026, 1, 1)
     fecha_fin = datetime(2026, 9, 25)
-    print(f"Buscando rango: 01/01/2026 al 25/09/2026 (Modo silencioso)...\n")
+    print(">>> EJECUTANDO CARGA HISTÓRICA: 01/01/2026 al 25/09/2026 <<<\n")
 else:
     fecha_fin = datetime.now()
     fecha_ini = fecha_fin - timedelta(days=5)
@@ -58,6 +63,7 @@ try:
     url = "https://www.bcb.gob.bo/?q=servicios/ufv/datos_estadisticos"
     driver.get(url)
 
+    # Cargar vista de períodos
     wait.until(EC.presence_of_element_located((By.ID, "combos1_5")))
     driver.execute_script("""
         var sel = document.getElementById('combos1_5');
@@ -68,6 +74,7 @@ try:
     """)
     time.sleep(4)
 
+    # Pasar al iframe
     iframe = wait.until(EC.presence_of_element_located((By.NAME, "indiframe")))
     driver.switch_to.frame(iframe)
 
@@ -87,10 +94,12 @@ try:
             }
         """, sel_elem, str(valor_buscado))
 
+    # Fecha inicial
     asignar_select(selects[0], fecha_ini.day)
     asignar_select(selects[1], MESES_NOMBRE[fecha_ini.month])
     asignar_select(selects[2], fecha_ini.year)
 
+    # Fecha final
     asignar_select(selects[3], fecha_fin.day)
     asignar_select(selects[4], MESES_NOMBRE[fecha_fin.month])
     asignar_select(selects[5], fecha_fin.year)
@@ -106,7 +115,6 @@ try:
     filas = driver.find_elements(By.XPATH, "//table[contains(., 'Valor de la UFV')]//tr")
     datos_a_insertar = []
 
-    # Arddangos y penawdau tabl[cite: 11]
     print(f"{'Nro.':<6} | {'Fecha':<26} | {'Valor UFV':<10}")
     print("-" * 50)
 
@@ -118,18 +126,21 @@ try:
             valor_txt = columnas[2].text.strip()
 
             if nro_txt.isdigit():
-                # Arddangos y rhesi yn union fel yn y ddelwedd[cite: 11]
                 print(f"{nro_txt:<6} | {fecha_txt:<26} | {valor_txt:<10}")
 
-                partes = fecha_txt.split(" de ")
-                if len(partes) == 3:
-                    dia = int(partes[0])
-                    mes = MESES_NUMERO.get(partes[1].lower(), 0)
-                    anio = int(partes[2])
+                # Parseo robusto de fechas como: "21 de Septiembre 2026"
+                match = re.search(r"(\d{1,2})\s+de\s+([A-Za-z]+)\s+(\d{4})", fecha_txt, re.IGNORECASE)
+                if match:
+                    dia = int(match.group(1))
+                    mes_nombre = match.group(2).lower()
+                    anio = int(match.group(3))
+                    mes = MESES_NUMERO.get(mes_nombre, 0)
 
                     if mes > 0:
                         fecha_iso = f"{anio:04d}-{mes:02d}-{dia:02d}"
-                        valor_limpio = float(valor_txt.replace(".", "").replace(",", "."))
+                        # Eliminar posibles puntos de miles y sustituir coma por punto
+                        val_num = valor_txt.replace(".", "").replace(",", ".")
+                        valor_limpio = float(val_num)
 
                         datos_a_insertar.append({
                             "nro": int(nro_txt),
@@ -138,16 +149,17 @@ try:
                         })
 
     print("-" * 50)
-    print(f"\nCyfanswm cofnodion a gasglwyd: {len(datos_a_insertar)}")
+    print(f"\nTotal registros preparados para guardar: {len(datos_a_insertar)}")
 
     if datos_a_insertar:
+        # Insertar en lotes de 100 registros con upsert
         batch_size = 100
         for i in range(0, len(datos_a_insertar), batch_size):
             lote = datos_a_insertar[i:i + batch_size]
             supabase.table("ufv_datos").upsert(lote, on_conflict="fecha").execute()
-        print("Data wedi'i uwchlwytho'n llwyddiannus i Supabase!")
+        print("¡Sincronización con Supabase completada con éxito!")
     else:
-        print("Ni ddarganfuwyd unrhyw ddata yn y tabl.")
+        print("Atención: No se procesaron filas de datos.")
 
 finally:
     driver.quit()
