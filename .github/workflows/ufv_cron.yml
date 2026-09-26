@@ -2,14 +2,9 @@ name: Actualizador UFV Supabase
 
 on:
   schedule:
-    # Se ejecuta todos los dias a las 08:00 AM hora Bolivia (12:00 UTC)
-    - cron: '0 12 * * *'
+    # 04:30 UTC equivale exactamente a las 00:30 (12:30 AM) hora de Bolivia
+    - cron: '30 4 * * *'
   workflow_dispatch:
-    inputs:
-      modo_historico:
-        description: 'Escribe true para cargar la historia (01/01/2026 al 25/09/2026)'
-        required: false
-        default: 'false'
 
 jobs:
   ejecutar-bot:
@@ -27,7 +22,7 @@ jobs:
       - name: Instalar Google Chrome
         uses: browser-actions/setup-chrome@v1
 
-      - name: Instalar librerias
+      - name: Instalar dependencias
         run: |
           pip install -r requirements.txt
 
@@ -35,6 +30,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          MODO_HISTORICO: ${{ github.event.inputs.modo_historico || 'false' }}
         run: |
           python scraper.py
