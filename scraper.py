@@ -2,7 +2,8 @@ import os
 import sys
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
+import zoneinfo
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -32,21 +33,15 @@ MESES_NUMERO = {
     "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
 }
 
-# 1. Verificar si la base de datos está vacía; si no tiene registros, forzar histórico
-modo_env = str(os.environ.get("MODO_HISTORICO", "")).strip().lower()
-es_historico_manual = modo_env in ["true", "1", "yes", "si"]
+# 1. Obtener la fecha actual con la zona horaria oficial de Bolivia (UTC-4)
+tz_bo = zoneinfo.ZoneInfo("America/La_Paz")
+hoy = datetime.now(tz_bo)
 
-datos_existentes = supabase.table("ufv_datos").select("id").limit(1).execute()
-base_datos_vacia = len(datos_existentes.data) == 0
+# Tanto fecha inicial como fecha final son el día de hoy
+fecha_ini = hoy
+fecha_fin = hoy
 
-if es_historico_manual or base_datos_vacia:
-    fecha_ini = datetime(2026, 1, 1)
-    fecha_fin = datetime(2026, 9, 25)
-    print(">>> EJECUTANDO CARGA HISTÓRICA: 01/01/2026 al 25/09/2026 <<<\n")
-else:
-    fecha_fin = datetime.now()
-    fecha_ini = fecha_fin - timedelta(days=5)
-    print(f"Buscando rango: {fecha_ini.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')} (Modo silencioso)...\n")
+print(f"Buscando fecha del día: {hoy.strftime('%d/%m/%Y')} (12:30 AM Bolivia)...\n")
 
 options = webdriver.ChromeOptions()
 options.add_argument("--headless=new")
@@ -74,7 +69,7 @@ try:
     """)
     time.sleep(4)
 
-    # Pasar al iframe
+    # Entrar al iframe
     iframe = wait.until(EC.presence_of_element_located((By.NAME, "indiframe")))
     driver.switch_to.frame(iframe)
 
@@ -94,12 +89,12 @@ try:
             }
         """, sel_elem, str(valor_buscado))
 
-    # Fecha inicial
+    # Fecha inicial: día de hoy
     asignar_select(selects[0], fecha_ini.day)
     asignar_select(selects[1], MESES_NOMBRE[fecha_ini.month])
     asignar_select(selects[2], fecha_ini.year)
 
-    # Fecha final
+    # Fecha final: día de hoy
     asignar_select(selects[3], fecha_fin.day)
     asignar_select(selects[4], MESES_NOMBRE[fecha_fin.month])
     asignar_select(selects[5], fecha_fin.year)
@@ -128,7 +123,6 @@ try:
             if nro_txt.isdigit():
                 print(f"{nro_txt:<6} | {fecha_txt:<26} | {valor_txt:<10}")
 
-                # Parseo robusto de fechas como: "21 de Septiembre 2026"
                 match = re.search(r"(\d{1,2})\s+de\s+([A-Za-z]+)\s+(\d{4})", fecha_txt, re.IGNORECASE)
                 if match:
                     dia = int(match.group(1))
@@ -138,7 +132,6 @@ try:
 
                     if mes > 0:
                         fecha_iso = f"{anio:04d}-{mes:02d}-{dia:02d}"
-                        # Eliminar posibles puntos de miles y sustituir coma por punto
                         val_num = valor_txt.replace(".", "").replace(",", ".")
                         valor_limpio = float(val_num)
 
@@ -149,17 +142,14 @@ try:
                         })
 
     print("-" * 50)
-    print(f"\nTotal registros preparados para guardar: {len(datos_a_insertar)}")
+    print(f"\nRegistros del día extraídos: {len(datos_a_insertar)}")
 
+    # Guardar asegurando datos únicos (si la fecha ya existe, solo la actualiza y no crea duplicados)
     if datos_a_insertar:
-        # Insertar en lotes de 100 registros con upsert
-        batch_size = 100
-        for i in range(0, len(datos_a_insertar), batch_size):
-            lote = datos_a_insertar[i:i + batch_size]
-            supabase.table("ufv_datos").upsert(lote, on_conflict="fecha").execute()
-        print("¡Sincronización con Supabase completada con éxito!")
+        supabase.table("ufv_datos").upsert(datos_a_insertar, on_conflict="fecha").execute()
+        print("¡Dato del día guardado correctamente en Supabase!")
     else:
-        print("Atención: No se procesaron filas de datos.")
+        print("Aviso: No se encontraron datos para la fecha actual.")
 
 finally:
     driver.quit()
